@@ -1,105 +1,143 @@
-Option Explicit
-
-Sub ConvertDateTime()
-    Dim ws        As Worksheet: Set ws = ActiveSheet
-    Dim isSame    As VbMsgBoxResult
-    Dim firstRow  As Long, lastRow As Long, outCol As Long
-    Dim selRng    As Range, dateRng As Range, timeRng As Range
-    Dim i         As Long
-    Dim s         As String
-    Dim dStr      As String, tStr As String, fullStr As String
+Sub 智能分列()
+    Dim selCol    As Range
+    Dim sep       As String
+    Dim colIndex  As Long
+    Dim startRow  As Long, endRow As Long
+    Dim r         As Long
+    Dim fullText  As String
+    Dim pos       As Long
+    Dim firstPart As String, secondPart As String
+    Dim userChoice As String
     
-    ' 性能优化
-    With Application
-        .ScreenUpdating = False
-        .Calculation = xlCalculationManual
-    End With
-    
-    ' 选择模式
-    isSame = MsgBox("日期和时间是否在同一单元格？" & vbCrLf & _
-                    "【是】→ 单列模式" & vbCrLf & _
-                    "【否】→ 双列模式", _
-                    vbYesNoCancel + vbQuestion, "选择模式")
-    If isSame = vbCancel Then GoTo Finish
-    
-    If isSame = vbYes Then
-        ' 单列模式
-        Set selRng = Application.InputBox("请选择存放日期时间的列（单列）", "选择列", Type:=8)
-        If selRng Is Nothing Or selRng.Columns.Count <> 1 Then GoTo Finish
-        
-        firstRow = selRng.Row
-        lastRow = ws.Cells(ws.Rows.Count, selRng.Column).End(xlUp).Row
-        outCol = selRng.Column + 1
-        ws.Columns(outCol).Insert Shift:=xlToRight
-        
-        For i = firstRow To lastRow
-            s = Trim(CStr(ws.Cells(i, selRng.Column).Value))
-            ' 只处理至少 8 位且前 8 位全为数字的情况
-            If Len(s) >= 8 And IsNumeric(Left(s, 8)) Then
-                ws.Cells(i, outCol).Value = ParseDateTimeString(s)
-                ws.Cells(i, outCol).NumberFormat = "yyyy/m/d hh:mm:ss"
-            End If
-        Next i
-        
-    Else
-        ' 双列模式
-        Set dateRng = Application.InputBox("请选择“日期”列（单列）", "选择日期列", Type:=8)
-        Set timeRng = Application.InputBox("请选择“时间”列（单列）", "选择时间列", Type:=8)
-        If dateRng Is Nothing Or timeRng Is Nothing _
-           Or dateRng.Columns.Count <> 1 Or timeRng.Columns.Count <> 1 Then GoTo Finish
-        
-        firstRow = Application.Min(dateRng.Row, timeRng.Row)
-        lastRow = Application.Max( _
-                     ws.Cells(ws.Rows.Count, dateRng.Column).End(xlUp).Row, _
-                     ws.Cells(ws.Rows.Count, timeRng.Column).End(xlUp).Row)
-        outCol = timeRng.Column + 1
-        ws.Columns(outCol).Insert Shift:=xlToRight
-        
-        For i = firstRow To lastRow
-            dStr = Trim(CStr(ws.Cells(i, dateRng.Column).Value))
-            tStr = Trim(CStr(ws.Cells(i, timeRng.Column).Value))
-            ' 只处理日期至少 8 位且为数字的行
-            If Len(dStr) >= 8 And IsNumeric(Left(dStr, 8)) Then
-                fullStr = dStr & tStr
-                ws.Cells(i, outCol).Value = ParseDateTimeString(fullStr)
-                ws.Cells(i, outCol).NumberFormat = "yyyy/m/d hh:mm:ss"
-            End If
-        Next i
+    ' —— 1. 选择列 ——
+    On Error Resume Next
+    Set selCol = Application.InputBox("请选择要分列的单列范围：", "选择列", Type:=8)
+    On Error GoTo 0
+    If selCol Is Nothing Then Exit Sub
+    If selCol.Columns.Count <> 1 Then
+        MsgBox "?? 请仅选择一列！", vbExclamation
+        Exit Sub
     End If
     
-    MsgBox "转换完成！", vbInformation
-
-Finish:
-    With Application
-        .Calculation = xlCalculationAutomatic
-        .ScreenUpdating = True
+    colIndex = selCol.Column
+    
+    ' —— 2. 输入分隔符 ——
+    sep = InputBox("请输入用于分列的字符（汉字/英文字母/数字/符号）：", "分隔符")
+    If sep = "" Then
+        MsgBox "?? 未输入分隔符，已取消操作。", vbExclamation
+        Exit Sub
+    End If
+    
+    ' —— 3. 识别有效数据区域 ——
+    Dim firstCell As Range, lastCell As Range
+    With selCol
+        Set firstCell = .Find(What:="*", LookIn:=xlValues, LookAt:=xlPart, SearchDirection:=xlNext)
+        Set lastCell = .Find(What:="*", LookIn:=xlValues, LookAt:=xlPart, SearchDirection:=xlPrevious)
     End With
+    If firstCell Is Nothing Then
+        MsgBox "?? 所选列中没有数据，取消操作。", vbInformation
+        Exit Sub
+    End If
+    startRow = firstCell.Row
+    endRow = lastCell.Row
+    
+    ' —— 4. 选择拆分方式 ——
+    userChoice = InputBox( _
+        "请选择拆分方式：" & vbCrLf & _
+        "1 = 分隔符放在左侧值后面（只按首个符号拆分）" & vbCrLf & _
+        "2 = 分隔符放在右侧值前面（只按首个符号拆分）" & vbCrLf & _
+        "3 = 分隔符单独占一列（只按首个符号拆分）" & vbCrLf & _
+        "4 = 全部按分隔符拆分（按所有符号依次拆列）", _
+        "分隔符位置选择", "1")
+    If userChoice <> "1" And userChoice <> "2" And userChoice <> "3" And userChoice <> "4" Then
+        MsgBox "?? 输入无效，操作已取消。", vbExclamation
+        Exit Sub
+    End If
+    
+    ' —— 5. 全部拆分 ——
+    If userChoice = "4" Then
+        Dim parts()      As String
+        Dim maxParts    As Long
+        Dim countParts  As Long
+        Dim i           As Long
+        
+        ' 5.1 找出最大拆分段数
+        For r = startRow To endRow
+            fullText = CStr(Cells(r, colIndex).Value)
+            parts = Split(fullText, sep)
+            countParts = UBound(parts) - LBound(parts) + 1
+            If countParts > maxParts Then maxParts = countParts
+        Next r
+        
+        If maxParts <= 1 Then
+            MsgBox "未检测到任何分隔符，取消操作。", vbInformation
+            Exit Sub
+        End If
+        
+        ' 5.2 插入 maxParts 列 & 设置文本格式
+        Columns(colIndex + 1).Resize(, maxParts).Insert Shift:=xlToRight
+        Columns(colIndex + 1).Resize(, maxParts).NumberFormat = "@"
+        
+        ' 5.3 按所有段依次填值
+        For r = startRow To endRow
+            fullText = CStr(Cells(r, colIndex).Value)
+            parts = Split(fullText, sep)
+            For i = LBound(parts) To UBound(parts)
+                Cells(r, colIndex + 1 + i).Value = parts(i)
+            Next i
+        Next r
+        
+        MsgBox "全部拆分完成！共拆出 " & maxParts & " 段。", vbInformation
+        Exit Sub
+    End If
+    
+    ' —— 6. 只按首个符号拆分 ——
+    Dim outCols As Range
+    If userChoice = "3" Then
+        Set outCols = Range(Columns(colIndex + 1), Columns(colIndex + 3))
+    Else
+        Set outCols = Range(Columns(colIndex + 1), Columns(colIndex + 2))
+    End If
+    outCols.Insert Shift:=xlToRight
+    outCols.NumberFormat = "@"
+    
+    ' 6.1 遍历每行，按首个符号拆分
+    For r = startRow To endRow
+        fullText = CStr(Cells(r, colIndex).Value)
+        pos = InStr(fullText, sep)
+        
+        If pos > 0 Then
+            Select Case userChoice
+                Case "1"  ' 分隔符放左侧尾部
+                    firstPart = Left(fullText, pos + Len(sep) - 1)
+                    secondPart = Mid(fullText, pos + Len(sep))
+                    Cells(r, colIndex + 1).Value = firstPart
+                    Cells(r, colIndex + 2).Value = secondPart
+                Case "2"  ' 分隔符放右侧前部
+                    firstPart = Left(fullText, pos - 1)
+                    secondPart = sep & Mid(fullText, pos + Len(sep))
+                    Cells(r, colIndex + 1).Value = firstPart
+                    Cells(r, colIndex + 2).Value = secondPart
+                Case "3"  ' 分隔符占中间一列
+                    firstPart = Left(fullText, pos - 1)
+                    secondPart = Mid(fullText, pos + Len(sep))
+                    Cells(r, colIndex + 1).Value = firstPart
+                    Cells(r, colIndex + 2).Value = sep
+                    Cells(r, colIndex + 3).Value = secondPart
+            End Select
+        Else
+            ' 未找到分隔符时，左移原值
+            Cells(r, colIndex + 1).Value = fullText
+            If userChoice = "3" Then
+                Cells(r, colIndex + 2).Value = ""
+                Cells(r, colIndex + 3).Value = ""
+            Else
+                Cells(r, colIndex + 2).Value = ""
+            End If
+        End If
+    Next r
+    
+    MsgBox "操作完成！", vbInformation
 End Sub
-
-'================================================================
-' 将任意长度的 yyyyMMdd[hhmmss...] 字符串
-' 截取/补零到 14 位，解析成 Date 返回
-Function ParseDateTimeString(ByVal s As String) As Date
-    On Error GoTo ErrHandler
-    Dim core As String
-    Dim y As Integer, m As Integer, d As Integer
-    Dim hh As Integer, nn As Integer, ss As Integer
-    
-    ' 截取前 14 位，不足补“0”
-    core = Left(s & String(14, "0"), 14)
-    
-    y = CInt(Mid(core, 1, 4))
-    m = CInt(Mid(core, 5, 2))
-    d = CInt(Mid(core, 7, 2))
-    hh = CInt(Mid(core, 9, 2))
-    nn = CInt(Mid(core, 11, 2))
-    ss = CInt(Mid(core, 13, 2))
-    
-    ParseDateTimeString = DateSerial(y, m, d) + TimeSerial(hh, nn, ss)
-    Exit Function
-ErrHandler:
-    ' 出错时返回 0（相当于 1900-01-00 00:00:00），或你也可以设成 Now()
-    ParseDateTimeString = 0
-End Function
 
 
